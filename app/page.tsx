@@ -297,6 +297,73 @@ function resumePdfName(name: string) {
   return `${normalizedName || 'Resume'}.pdf`
 }
 
+function loadImageDataUrl(src: string) {
+  return new Promise<string>((resolve, reject) => {
+    if (src.startsWith('data:image/')) {
+      resolve(src)
+      return
+    }
+
+    const image = new Image()
+    image.crossOrigin = 'anonymous'
+    image.onload = () => {
+      const canvas = document.createElement('canvas')
+      const context = canvas.getContext('2d')
+
+      if (!context) {
+        reject(new Error('Could not prepare photo for PDF.'))
+        return
+      }
+
+      canvas.width = image.naturalWidth
+      canvas.height = image.naturalHeight
+      context.drawImage(image, 0, 0)
+      resolve(canvas.toDataURL('image/png'))
+    }
+    image.onerror = () => reject(new Error('Could not load resume photo.'))
+    image.src = src
+  })
+}
+
+function makeCircularImageDataUrl(src: string, size = 720) {
+  return new Promise<string>((resolve, reject) => {
+    const image = new Image()
+    image.onload = () => {
+      const canvas = document.createElement('canvas')
+      const context = canvas.getContext('2d')
+
+      if (!context) {
+        reject(new Error('Could not prepare circular photo.'))
+        return
+      }
+
+      const sourceSize = Math.min(image.naturalWidth, image.naturalHeight)
+      const sourceX = (image.naturalWidth - sourceSize) / 2
+      const sourceY = (image.naturalHeight - sourceSize) / 2
+
+      canvas.width = size
+      canvas.height = size
+      context.save()
+      context.beginPath()
+      context.arc(size / 2, size / 2, size / 2, 0, Math.PI * 2)
+      context.closePath()
+      context.clip()
+      context.drawImage(image, sourceX, sourceY, sourceSize, sourceSize, 0, 0, size, size)
+      context.restore()
+      resolve(canvas.toDataURL('image/png'))
+    }
+    image.onerror = () => reject(new Error('Could not render circular photo.'))
+    image.src = src
+  })
+}
+
+function splitCommaList(value: string) {
+  return value
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean)
+}
+
 function normalizeResumeData(value: ResumeData): ResumeData {
   return {
     ...initialData,
@@ -549,6 +616,8 @@ function Panel({
 
 export default function Page() {
   const [data, setData] = useState<ResumeData>(initialData)
+  const [isExportingPdf, setIsExportingPdf] = useState(false)
+  const [pdfStatus, setPdfStatus] = useState('')
 
   useEffect(() => {
     const saved = window.localStorage.getItem(STORAGE_KEY)
@@ -704,39 +773,238 @@ export default function Page() {
   }
 
   const exportPdf = async () => {
-    const resumeSheet = document.querySelector<HTMLElement>('.resume-sheet')
-
-    if (!resumeSheet) {
+    if (isExportingPdf) {
       return
     }
 
-    await document.fonts?.ready
-    await waitForResumeImages()
+    setIsExportingPdf(true)
+    setPdfStatus('Preparing PDF...')
 
-    const [{ default: html2canvas }, { jsPDF }] = await Promise.all([
-      import('html2canvas'),
-      import('jspdf'),
-    ])
+    try {
+      const { jsPDF } = await import('jspdf')
+      const pdf = new jsPDF({
+        orientation: 'portrait',
+        unit: 'mm',
+        format: 'a4',
+        compress: true,
+      })
 
-    const canvas = await html2canvas(resumeSheet, {
-      backgroundColor: '#ffffff',
-      scale: 2.5,
-      useCORS: true,
-      logging: false,
-      windowWidth: resumeSheet.scrollWidth,
-      windowHeight: resumeSheet.scrollHeight,
-    })
+      const blue = '#1685ff'
+      const gray = '#4b4b4b'
+      const darkGray = '#444444'
+      const lightGray = '#d4d4d4'
+      const margin = 14
+      const pageWidth = 210
+      const leftWidth = 104.5
+      const rightX = 127
+      const rightWidth = 69
 
-    const imageData = canvas.toDataURL('image/jpeg', 0.98)
-    const pdf = new jsPDF({
-      orientation: 'portrait',
-      unit: 'mm',
-      format: 'a4',
-      compress: true,
-    })
+      const setFont = (style: 'normal' | 'bold', size: number, color = '#111111') => {
+        pdf.setFont('helvetica', style)
+        pdf.setFontSize(size)
+        pdf.setTextColor(color)
+      }
 
-    pdf.addImage(imageData, 'JPEG', 0, 0, 210, 297, undefined, 'FAST')
-    pdf.save(resumePdfName(data.name))
+      const divider = (x: number, y: number, width: number) => {
+        pdf.setDrawColor('#111111')
+        pdf.setLineWidth(0.7)
+        pdf.line(x, y, x + width, y)
+      }
+
+      const sectionTitle = (title: string, x: number, y: number, width: number) => {
+        setFont('bold', 10.4, '#000000')
+        pdf.text(title.toUpperCase(), x, y)
+        divider(x, y + 1.7, width)
+      }
+
+      const wrappedText = (
+        text: string,
+        x: number,
+        y: number,
+        width: number,
+        size = 6.9,
+        lineHeight = 4.1,
+        color = gray
+      ) => {
+        setFont('normal', size, color)
+        const lines = pdf.splitTextToSize(text, width) as string[]
+        pdf.text(lines, x, y)
+        return y + lines.length * lineHeight
+      }
+
+      const linkLine = (text: string, x: number, y: number, icon: string, href?: string) => {
+        setFont('bold', 6.4, '#6b6f76')
+        pdf.text(icon, x, y)
+        setFont('normal', 6.9, darkGray)
+        if (href) {
+          pdf.textWithLink(text, x + 3.6, y, { url: href })
+        } else {
+          pdf.text(text, x + 3.6, y)
+        }
+      }
+
+      pdf.setFillColor('#ffffff')
+      pdf.rect(0, 0, 210, 297, 'F')
+
+      setFont('bold', 18.5, '#000000')
+      pdf.text(data.name.toUpperCase(), margin, 20)
+      setFont('normal', 10.5, '#000000')
+      pdf.text(data.title, margin, 26)
+
+      const photoDataUrl = await loadImageDataUrl(data.photo)
+      const circularPhoto = await makeCircularImageDataUrl(photoDataUrl)
+      pdf.addImage(circularPhoto, 'PNG', 169, 14, 29, 29)
+
+      setFont('bold', 6.4, blue)
+      pdf.text('P', margin, 32.8)
+      setFont('bold', 6.4, darkGray)
+      pdf.text(data.contacts[0]?.value ?? '', margin + 3.7, 32.8)
+      setFont('bold', 6.4, blue)
+      pdf.text('@', margin + 46.5, 32.8)
+      setFont('bold', 6.4, darkGray)
+      pdf.text(data.contacts[1]?.value ?? '', margin + 50.2, 32.8)
+
+      linkLine(data.contacts[2]?.value ?? '', margin, 36.7, 'L', data.contacts[2]?.href)
+      linkLine(data.contacts[3]?.value ?? '', margin + 95, 36.7, 'L', data.contacts[3]?.href)
+      linkLine(data.contacts[4]?.value ?? '', margin, 40.6, 'M', data.contacts[4]?.href)
+      linkLine(data.contacts[5]?.value ?? '', margin + 56.5, 40.6, '*', data.contacts[5]?.href)
+
+      let leftY = 53
+      sectionTitle('Summary', margin, leftY, leftWidth)
+      leftY = wrappedText(data.summary, margin, leftY + 5.5, leftWidth, 7.2, 4.1) + 7
+
+      sectionTitle('Projects', margin, leftY, leftWidth)
+      leftY += 5.5
+
+      data.projects.forEach((project, index) => {
+        setFont('bold', 8.8, '#000000')
+        pdf.text(project.title, margin, leftY)
+        leftY += 4.8
+
+        if (project.github) {
+          linkLine(project.github, margin, leftY, 'M', project.github)
+          leftY += 4.2
+        }
+
+        if (project.live) {
+          linkLine(project.live, margin, leftY, 'L', project.live)
+          leftY += 4.2
+        }
+
+        if (project.date) {
+          linkLine(project.date, margin, leftY, 'D')
+          leftY += 4.2
+        }
+
+        leftY = wrappedText(project.summary, margin, leftY, leftWidth, 7, 4.1)
+
+        if (project.points?.length) {
+          project.points.forEach((point) => {
+            setFont('normal', 7, gray)
+            const lines = pdf.splitTextToSize(point, leftWidth - 5) as string[]
+            pdf.text('•', margin + 1, leftY)
+            pdf.text(lines, margin + 5, leftY)
+            leftY += lines.length * 4.1
+          })
+        }
+
+        if (index < data.projects.length - 1) {
+          pdf.setDrawColor(lightGray)
+          pdf.setLineWidth(0.25)
+          pdf.setLineDashPattern([1.2, 1.2], 0)
+          pdf.line(margin, leftY + 1.3, margin + leftWidth, leftY + 1.3)
+          pdf.setLineDashPattern([], 0)
+          leftY += 5.5
+        }
+      })
+
+      let rightY = 53
+      sectionTitle('Skills', rightX, rightY, rightWidth)
+      rightY += 7
+
+      const skillColumns = 3
+      const skillGap = 2.4
+      const skillWidth = (rightWidth - skillGap * (skillColumns - 1)) / skillColumns
+      data.skills.forEach((skill, index) => {
+        const col = index % skillColumns
+        const row = Math.floor(index / skillColumns)
+        const x = rightX + col * (skillWidth + skillGap)
+        const y = rightY + row * 9
+
+        setFont('bold', 7.3, '#454545')
+        pdf.text(skill, x + 1.6, y)
+        pdf.setDrawColor('#bdbdbd')
+        pdf.setLineWidth(0.25)
+        pdf.line(x, y + 2.8, x + skillWidth - 1.2, y + 2.8)
+      })
+
+      rightY += Math.ceil(data.skills.length / skillColumns) * 9 + 7
+      sectionTitle('Experience', rightX, rightY, rightWidth)
+      rightY += 7.5
+
+      data.experience.forEach((item, index) => {
+        if (index > 0) {
+          pdf.setDrawColor(lightGray)
+          pdf.setLineWidth(0.25)
+          pdf.setLineDashPattern([1.2, 1.2], 0)
+          pdf.line(rightX, rightY - 3, rightX + rightWidth, rightY - 3)
+          pdf.setLineDashPattern([], 0)
+        }
+
+        if (item.id === 'sparktech') {
+          pdf.setDrawColor('#63d627')
+          pdf.setLineWidth(1.1)
+          pdf.rect(rightX + 1.5, rightY - 3.2, 3.3, 3.3, 'S')
+        } else {
+          pdf.setFillColor('#79d7f8')
+          pdf.circle(rightX + 2.5, rightY - 2.4, 1.5, 'F')
+          pdf.setFillColor('#42dabf')
+          pdf.circle(rightX + 6, rightY - 0.8, 1.5, 'F')
+          pdf.setFillColor('#69c1ff')
+          pdf.circle(rightX + 1.3, rightY - 5.2, 1.5, 'F')
+        }
+
+        const contentX = rightX + 12
+        setFont('bold', 8.8, '#000000')
+        pdf.text(item.company, contentX, rightY)
+        rightY += 4.7
+        setFont('bold', 8.2, blue)
+        pdf.text(item.subtitle, contentX, rightY)
+        rightY += 5
+
+        linkLine(item.date, contentX, rightY, 'D')
+        if (item.location) {
+          linkLine(item.location, contentX + 31, rightY, 'M', '')
+        }
+        rightY += 4.4
+
+        if (item.link) {
+          linkLine(item.link, contentX, rightY, 'L', item.link)
+          rightY += 4.4
+        }
+
+        rightY = wrappedText(item.description, contentX, rightY, rightWidth - 12, 6.8, 3.8)
+
+        item.points.forEach((point) => {
+          setFont('normal', 6.8, gray)
+          const lines = pdf.splitTextToSize(point, rightWidth - 18) as string[]
+          pdf.text('•', contentX + 1, rightY)
+          pdf.text(lines, contentX + 5, rightY)
+          rightY += lines.length * 3.8
+        })
+
+        rightY += 5
+      })
+
+      pdf.save(resumePdfName(data.name))
+      setPdfStatus('PDF downloaded.')
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'PDF export failed.'
+      console.error(error)
+      setPdfStatus(message)
+    } finally {
+      setIsExportingPdf(false)
+    }
   }
 
   const resetData = () => {
@@ -769,16 +1037,20 @@ export default function Page() {
                   <button
                     type="button"
                     onClick={exportPdf}
-                    className="inline-flex h-10 items-center gap-2 rounded-xl bg-black px-3 text-sm font-semibold text-white transition hover:bg-neutral-800"
+                    disabled={isExportingPdf}
+                    className="inline-flex h-10 items-center gap-2 rounded-xl bg-black px-3 text-sm font-semibold text-white transition hover:bg-neutral-800 disabled:cursor-not-allowed disabled:bg-neutral-400"
                   >
                     <Printer className="h-4 w-4" />
-                    PDF
+                    {isExportingPdf ? 'Saving...' : 'PDF'}
                   </button>
                 </div>
               </div>
               <p className="mt-2 text-sm text-neutral-600">
                 Changes update the preview instantly. PDF downloads the resume.
               </p>
+              {pdfStatus ? (
+                <p className="mt-2 text-xs font-semibold text-neutral-500">{pdfStatus}</p>
+              ) : null}
             </div>
 
             <div className="flex-1 space-y-4 overflow-y-auto p-4">
